@@ -223,7 +223,14 @@ def retry(ctx: click.Context, run_id: int) -> None:
 @click.pass_context
 def cancel(ctx: click.Context, run_id: int) -> None:
     """Cancel a run."""
-    raise NotImplementedError
+    cfg: Config = ctx.obj["config"]
+    db_path = db_mod.init_db(cfg.data_dir)
+    conn = db_mod.get_conn(db_path)
+    try:
+        cancel_mod.cancel_run(conn, run_id, cfg.data_dir)
+        click.echo(f"Run {run_id} cancelled")
+    finally:
+        conn.close()
 
 
 @main.command()
