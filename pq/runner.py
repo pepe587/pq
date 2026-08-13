@@ -44,8 +44,15 @@ def _all_iterations_outputs_exist(iterations: list[Iteration], step: Step, pipel
             if not _count_from_outputs_exist(it, step.produces, pipeline_dir):
                 return False
         else:
-            if not _iteration_outputs_exist(it, pipeline_dir):
-                return False
+            if it.substituted_outputs:
+                if not _iteration_outputs_exist(it, pipeline_dir):
+                    return False
+            else:
+                # Non-iterating step: substituted_outputs is empty, so fall
+                # back to checking step.produces directly against disk.
+                for p in step.produces:
+                    if not (pipeline_dir / p).exists():
+                        return False
     return True
 
 

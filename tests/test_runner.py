@@ -203,6 +203,37 @@ def test_skip_non_iterating_pre_existing_outputs(tmp_path: Path):
     assert (pipe / "outputs" / "x.txt").read_text() == "pre-existing"
 
 
+def test_non_iterating_missing_outputs_runs(tmp_path: Path):
+    """run_step_with_retries must NOT skip a non-iterating step whose output is missing.
+
+    Regression: the previous _all_iterations_outputs_exist check vacuously
+    returned True for non-iterating steps (empty substituted_outputs), so
+    every non-iterating step with produces was being skipped.
+    """
+    pipe = tmp_path / "pipe"
+    pipe.mkdir()
+    (pipe / "outputs").mkdir()
+    # No pre-existing x.txt.
+    p = make_pipeline("p", pipe)
+    step = Step(
+        id="a",
+        command="sh",
+        args=["-c", "echo hello > outputs/x.txt"],
+        produces=["outputs/x.txt"],
+    )
+    result = run_step_with_retries(
+        step=step,
+        pipeline=p,
+        run_id=1,
+        data_dir=tmp_path / "data",
+        run_inputs={},
+        max_attempts=3,
+        backoff=(0, 0, 0),
+    )
+    assert result.status == "done"
+    assert (pipe / "outputs" / "x.txt").exists()
+
+
 def test_retry_then_success(tmp_path: Path):
     pipe = tmp_path / "pipe"
     pipe.mkdir()
