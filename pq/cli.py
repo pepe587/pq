@@ -170,7 +170,25 @@ def list_cmd(ctx: click.Context, status: str | None, limit: int) -> None:
 @click.pass_context
 def logs(ctx: click.Context, run_id: int, step_id: str | None) -> None:
     """Show logs of a run or step."""
-    raise NotImplementedError
+    cfg: Config = ctx.obj["config"]
+    base = cfg.data_dir / "runs" / str(run_id) / "steps"
+    if not base.exists():
+        raise click.ClickException(f"no logs for run {run_id}")
+    if step_id:
+        step_dirs = sorted(base.glob(f"{step_id}/*"))
+        if not step_dirs:
+            raise click.ClickException(f"no logs for step {step_id}")
+        for sd in step_dirs:
+            log = sd / "log.txt"
+            if log.exists():
+                click.echo(f"=== {sd.parent.name}/{sd.name} ===")
+                click.echo(log.read_text(), nl=False)
+    else:
+        for sd in sorted(base.glob("*/*")):
+            log = sd / "log.txt"
+            if log.exists():
+                click.echo(f"=== {sd.parent.name}/{sd.name} ===")
+                click.echo(log.read_text(), nl=False)
 
 
 @main.command()
