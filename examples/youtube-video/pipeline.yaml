@@ -1,0 +1,58 @@
+name: youtube-video
+cooldown: 4h
+inputs:
+  topic:
+    type: string
+    required: true
+
+steps:
+  - id: guion
+    command: sh
+    args: ["-c", "echo 'Guion sobre {topic}' > outputs/guion.txt && for i in 1 2 3 4 5 6; do echo \"prompt $i sobre {topic}\" > prompts/img_$i.txt; done"]
+    produces:
+      - outputs/guion.txt
+      - prompts/img_{i}.txt
+    iterates:
+      count: 6
+      out_template: prompts/img_{i}.txt
+
+  - id: imagenes
+    needs: [guion]
+    command: sh
+    args: ["-c", "cp prompts/img_{i}.txt outputs/imagenes/img_{i}.txt"]
+    iterates:
+      count: 6
+      out_template: outputs/imagenes/img_{i}.txt
+    produces:
+      - outputs/imagenes/img_{i}.txt
+
+  - id: clips
+    needs: [imagenes]
+    command: sh
+    args: ["-c", "echo 'clip from imagenes' > outputs/clips/clip_{i}.txt"]
+    iterates:
+      count_from: outputs/imagenes/img_*.txt
+    produces:
+      - outputs/clips/clip_{i}.txt
+
+  - id: audio
+    needs: [guion]
+    command: sh
+    args: ["-c", "echo 'audio track' > outputs/audio.txt"]
+    produces:
+      - outputs/audio.txt
+
+  - id: montaje
+    needs: [clips, audio]
+    command: sh
+    args: ["-c", "echo 'final video' > outputs/final.txt"]
+    produces:
+      - outputs/final.txt
+
+  - id: upload
+    type: upload
+    needs: [montaje]
+    command: sh
+    args: ["-c", "echo 'would upload' > outputs/uploaded.txt"]
+    produces:
+      - outputs/uploaded.txt

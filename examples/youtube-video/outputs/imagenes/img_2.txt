@@ -1,0 +1,1 @@
+prompt 2 sobre {topic}
