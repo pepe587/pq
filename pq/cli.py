@@ -130,10 +130,38 @@ def add(ctx: click.Context, pipeline_dir: str, inputs: tuple[str, ...]) -> None:
 
 @main.command(name="list")
 @click.option("--status", default=None, help="Filter by status.")
+@click.option("--limit", default=20, type=int, help="Max runs to show.")
 @click.pass_context
-def list_cmd(ctx: click.Context, status: str | None) -> None:
+def list_cmd(ctx: click.Context, status: str | None, limit: int) -> None:
     """List runs."""
-    raise NotImplementedError
+    cfg: Config = ctx.obj["config"]
+    db_path = db_mod.init_db(cfg.data_dir)
+    conn = db_mod.get_conn(db_path)
+    try:
+        if status:
+            cur = conn.execute(
+                "SELECT id, pipeline_name, status, created_at, finished_at "
+                "FROM runs WHERE status=? ORDER BY id DESC LIMIT ?",
+                (status, limit),
+            )
+        else:
+            cur = conn.execute(
+                "SELECT id, pipeline_name, status, created_at, finished_at "
+                "FROM runs ORDER BY id DESC LIMIT ?",
+                (limit,),
+            )
+        rows = cur.fetchall()
+        if not rows:
+            click.echo("(no runs)")
+            return
+        click.echo(f"{'ID':<6} {'PIPELINE':<20} {'STATUS':<12} {'CREATED':<20} {'FINISHED':<20}")
+        for r in rows:
+            click.echo(
+                f"{r['id']:<6} {r['pipeline_name']:<20} {r['status']:<12} "
+                f"{(r['created_at'] or ''):<20} {(r['finished_at'] or ''):<20}"
+            )
+    finally:
+        conn.close()
 
 
 @main.command()
