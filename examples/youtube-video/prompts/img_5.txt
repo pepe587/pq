@@ -1,1 +1,0 @@
-prompt 5 sobre {topic}
