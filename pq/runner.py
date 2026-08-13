@@ -17,14 +17,15 @@ class StepResult:
     exit_code: int | None = None
 
 
-def _all_outputs_exist(iteration, pipeline_dir: Path) -> bool:
-    for rel, abs_path in iteration.substituted_outputs.items():
+def _iteration_outputs_exist(iteration: Iteration, pipeline_dir: Path) -> bool:
+    """True iff every substituted output for this iteration exists on disk."""
+    for abs_path in iteration.substituted_outputs.values():
         if not abs_path.exists():
             return False
     return True
 
 
-def _all_outputs_exist_for_iter(iteration: Iteration, produces: list[str], pipeline_dir: Path) -> bool:
+def _count_from_outputs_exist(iteration: Iteration, produces: list[str], pipeline_dir: Path) -> bool:
     """For a count_from iter, requires that for every matched file an output file exists."""
     if not produces:
         return False
@@ -33,6 +34,18 @@ def _all_outputs_exist_for_iter(iteration: Iteration, produces: list[str], pipel
         rel = template.replace("{i}", src.stem.split("_")[-1])
         if not (pipeline_dir / rel).exists():
             return False
+    return True
+
+
+def _all_iterations_outputs_exist(iterations: list[Iteration], step: Step, pipeline_dir: Path) -> bool:
+    """True iff every iteration's outputs are present on disk (skip-if-exists)."""
+    for it in iterations:
+        if step.iterates is not None and step.iterates.count_from is not None:
+            if not _count_from_outputs_exist(it, step.produces, pipeline_dir):
+                return False
+        else:
+            if not _iteration_outputs_exist(it, pipeline_dir):
+                return False
     return True
 
 
@@ -59,9 +72,9 @@ def _run_single_iteration(
     iteration: Iteration,
 ) -> StepResult:
     """Run the step once per file in iteration.matched_glob (or once if empty)."""
-    if step.produces and iteration.substituted_outputs and _all_outputs_exist(iteration, pipeline.dir):
+    if step.produces and iteration.substituted_outputs and _iteration_outputs_exist(iteration, pipeline.dir):
         return StepResult(status="skipped")
-    if step.produces and iteration.matched_glob and _all_outputs_exist_for_iter(iteration, step.produces, pipeline.dir):
+    if step.produces and iteration.matched_glob and _count_from_outputs_exist(iteration, step.produces, pipeline.dir):
         return StepResult(status="skipped")
 
     env = _build_env(run_id, run_inputs, data_dir, pipeline.name)
@@ -72,15 +85,9 @@ def _run_single_iteration(
 
     files = iteration.matched_glob if iteration.matched_glob else [None]
     for src in files:
-        # Build args for this single file
-        args = list(step.args)
-        if src is not None:
-            args = [a.replace("{prompts}", str(src)) for a in args]
-            # For count_from fan-out, derive {i} from the matched file's stem.
-            per_file_index = src.stem.split("_")[-1]
-        else:
-            per_file_index = str(iteration.index)
-        args = [a.replace("{i}", per_file_index) for a in args]
+        # For count_from fan-out, derive {i} from the matched file's stem.
+        per_file_index = src.stem.split("_")[-1] if src is not None else str(iteration.index)
+        args = [a.replace("{i}", per_file_index) for a in step.args]
 
         with log_path.open("a") as logf:
             proc = subprocess.run(
@@ -114,7 +121,7 @@ def run_step(
         if step.iterates is None:
             all_exist = all((pipeline.dir / p).exists() for p in step.produces)
         else:
-            all_exist = _all_outputs_exist(iteration, pipeline.dir)
+            all_exist = _iteration_outputs_exist(iteration, pipeline.dir)
         if all_exist:
             return StepResult(status="skipped")
 
@@ -150,24 +157,39 @@ def run_step_with_retries(
     max_attempts: int,
     backoff: tuple[int, ...],
 ) -> StepResult:
-    """Run step, retrying on failure with the given backoff (seconds)."""
+    """Run step, retrying on failure with the given backoff (seconds).
+
+    Iterates fan-out: every iteration returned by expand_iterations is run.
+    Retry semantics: the WHOLE step (all iterations) is retried on any failure;
+    we do not retry per-iteration. This keeps idempotency simple — if a
+    step's iterations are not independent, retrying only the failed one
+    could leave shared state inconsistent.
+    """
     iterations = expand_iterations(step, pipeline.dir)
-    # Skip check for non-iterating steps with produces
-    if step.iterates is None and step.produces:
-        it = iterations[0]
-        if it.substituted_outputs and all(p.exists() for p in it.substituted_outputs.values()):
-            return StepResult(status="skipped")
+
+    # Skip check applied once across all iterations.
+    if step.produces and _all_iterations_outputs_exist(iterations, step, pipeline.dir):
+        return StepResult(status="skipped")
 
     last_status = "failed"
     last_exit = None
     for attempt in range(1, max_attempts + 1):
-        result = _run_single_iteration(step, pipeline, run_id, data_dir, run_inputs, iterations[0])
-        if result.status == "done":
-            return result
-        if result.status == "skipped":
-            return result
-        last_status = "failed"
-        last_exit = result.exit_code
+        # Reset per-attempt: re-run every iteration from scratch.
+        attempt_failed = False
+        for iteration in iterations:
+            result = _run_single_iteration(
+                step, pipeline, run_id, data_dir, run_inputs, iteration
+            )
+            if result.status == "failed":
+                last_status = "failed"
+                last_exit = result.exit_code
+                attempt_failed = True
+                break
+            # "skipped" mid-loop means outputs already exist for that iter;
+            # treat the whole step as done.
+        if not attempt_failed:
+            return StepResult(status="done", exit_code=0)
+
         if attempt < max_attempts:
             delay = backoff[min(attempt - 1, len(backoff) - 1)]
             if delay > 0:
