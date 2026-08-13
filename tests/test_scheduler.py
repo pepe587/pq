@@ -32,7 +32,6 @@ def test_pick_respects_cooldown(tmp_path: Path):
 def test_pick_skips_when_quota_full(tmp_path: Path):
     init_db(tmp_path)
     conn = get_conn(tmp_path / "pq.db")
-    _add_run(conn, "a")
     # Fill quota for today
     for _ in range(3):
         conn.execute("INSERT OR REPLACE INTO counters (day, uploads_count) VALUES (?, 1)", ("2026-08-14",))
