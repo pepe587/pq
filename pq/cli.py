@@ -237,7 +237,14 @@ def cancel(ctx: click.Context, run_id: int) -> None:
 @click.pass_context
 def daemon(ctx: click.Context) -> None:
     """Run the worker in the foreground."""
-    raise NotImplementedError
+    from pq.worker import worker_loop
+    from pq.signals import WorkerStop, install_handlers
+    cfg: Config = ctx.obj["config"]
+    stop = WorkerStop()
+    install_handlers(stop)
+    click.echo("Worker started. Ctrl+C to stop.")
+    worker_loop(cfg, stop)
+    click.echo("Worker stopped.")
 
 
 if __name__ == "__main__":
