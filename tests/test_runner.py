@@ -1,10 +1,11 @@
 import os
+import time
 from pathlib import Path
 import textwrap
 from click.testing import CliRunner
 from pq.cli import main
 from pq.pipelines import Pipeline, Step, Iterates, Input
-from pq.runner import run_step, StepResult
+from pq.runner import run_step, StepResult, run_step_with_retries
 
 
 def make_pipeline(name: str, dir_: Path) -> Pipeline:
@@ -109,3 +110,73 @@ def test_env_vars_injected(tmp_path: Path):
     content = (pipe / "outputs" / "x.txt").read_text()
     assert "42" in content
     assert "hello" in content
+
+
+def test_fan_out_count(tmp_path: Path):
+    pipe = tmp_path / "pipe"
+    pipe.mkdir()
+    (pipe / "prompts").mkdir()
+    (pipe / "prompts" / "img_1.txt").write_text("p1")
+    (pipe / "prompts" / "img_2.txt").write_text("p2")
+    (pipe / "prompts" / "img_3.txt").write_text("p3")
+    (pipe / "outputs" / "imagenes").mkdir(parents=True)
+    p = make_pipeline("p", pipe)
+    step = Step(
+        id="imgs",
+        command="sh",
+        args=["-c", "cp {prompts} outputs/imagenes/img_{i}.txt"],
+        produces=["outputs/imagenes/img_{i}.txt"],
+        iterates=Iterates(count_from="prompts/img_*.txt"),
+    )
+    result = run_step_with_retries(
+        step=step,
+        pipeline=p,
+        run_id=1,
+        data_dir=tmp_path / "data",
+        run_inputs={},
+        max_attempts=3,
+        backoff=(0, 0, 0),
+    )
+    assert result.status == "done"
+    for i in (1, 2, 3):
+        assert (pipe / "outputs" / "imagenes" / f"img_{i}.txt").exists()
+
+
+def test_retry_then_success(tmp_path: Path):
+    pipe = tmp_path / "pipe"
+    pipe.mkdir()
+    p = make_pipeline("p", pipe)
+    # Use a counter file to fail twice then succeed
+    (pipe / "counter").write_text("0")
+    step = Step(
+        id="a",
+        command="sh",
+        args=["-c", "n=$(cat counter); n=$((n+1)); echo $n > counter; [ $n -ge 3 ]"],
+    )
+    result = run_step_with_retries(
+        step=step,
+        pipeline=p,
+        run_id=1,
+        data_dir=tmp_path / "data",
+        run_inputs={},
+        max_attempts=5,
+        backoff=(0, 0, 0, 0, 0),
+    )
+    assert result.status == "done"
+
+
+def test_retry_exhausted_returns_failed(tmp_path: Path):
+    pipe = tmp_path / "pipe"
+    pipe.mkdir()
+    p = make_pipeline("p", pipe)
+    step = Step(id="a", command="false")
+    result = run_step_with_retries(
+        step=step,
+        pipeline=p,
+        run_id=1,
+        data_dir=tmp_path / "data",
+        run_inputs={},
+        max_attempts=3,
+        backoff=(0, 0, 0),
+    )
+    assert result.status == "failed"

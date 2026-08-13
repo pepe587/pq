@@ -3,21 +3,18 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from pq.pipelines import Pipeline, Step
-from pq.iterations import expand_iterations
+from pq.iterations import Iteration, expand_iterations
 
 
 @dataclass
 class StepResult:
     status: str  # "done" | "skipped" | "failed"
     exit_code: int | None = None
-
-
-def _resolve_path(pipeline_dir: Path, template: str) -> Path:
-    return pipeline_dir / template
 
 
 def _all_outputs_exist(iteration, pipeline_dir: Path) -> bool:
@@ -27,38 +24,16 @@ def _all_outputs_exist(iteration, pipeline_dir: Path) -> bool:
     return True
 
 
-def _resolve_dependencies(step: Step, pipeline: Pipeline) -> dict[str, str]:
-    """Replace {<step_id>} in args with a list-formatted string of resolved paths.
-
-    For needs-resolved steps, we substitute the placeholder with a list of paths
-    that the runner will fan out. For now, we keep a single substitution: the
-    runner expands the glob and calls the command once per file.
-
-    Returns a mapping of placeholder -> comma-separated string of paths (relative
-    to pipeline_dir). The runner handles per-file fan-out by inspecting this.
-    """
-    deps: dict[str, str] = {}
-    for need_id in step.needs:
-        for arg in step.args:
-            if f"{{{need_id}}}" in arg:
-                # find dependency step
-                dep = next((s for s in pipeline.steps if s.id == need_id), None)
-                if dep is None:
-                    continue
-                # resolve outputs from the dep step's produces (after iteration)
-                # if dep has count, outputs use {i}; the latest run's outputs are read from disk
-                if dep.iterates and dep.iterates.count is not None:
-                    paths = []
-                    for i in range(1, dep.iterates.count + 1):
-                        for prod in dep.produces:
-                            rel = prod.replace("{i}", str(i))
-                            paths.append(rel)
-                elif dep.iterates and dep.iterates.count_from is not None:
-                    paths = sorted(str(p.relative_to(pipeline.dir)) for p in pipeline.dir.glob(dep.iterates.count_from))
-                else:
-                    paths = list(dep.produces)
-                deps[f"{{{need_id}}}"] = "\n".join(paths)
-    return deps
+def _all_outputs_exist_for_iter(iteration: Iteration, produces: list[str], pipeline_dir: Path) -> bool:
+    """For a count_from iter, requires that for every matched file an output file exists."""
+    if not produces:
+        return False
+    template = produces[0]
+    for src in iteration.matched_glob:
+        rel = template.replace("{i}", src.stem.split("_")[-1])
+        if not (pipeline_dir / rel).exists():
+            return False
+    return True
 
 
 def _build_env(run_id: int, run_inputs: dict[str, str], data_dir: Path, pipeline_name: str) -> dict[str, str]:
@@ -71,15 +46,55 @@ def _build_env(run_id: int, run_inputs: dict[str, str], data_dir: Path, pipeline
 
 
 def _build_args(step: Step, pipeline: Pipeline, iteration_index: int) -> list[str]:
-    """Substitute {i} and {<step_id>} (the latter as newline-separated path lists)."""
-    deps = _resolve_dependencies(step, pipeline)
-    out = []
-    for arg in step.args:
-        new = arg.replace("{i}", str(iteration_index))
-        for placeholder, paths in deps.items():
-            new = new.replace(placeholder, paths)
-        out.append(new)
-    return out
+    """Substitute {i} only. Dependency resolution is the scheduler's job."""
+    return [arg.replace("{i}", str(iteration_index)) for arg in step.args]
+
+
+def _run_single_iteration(
+    step: Step,
+    pipeline: Pipeline,
+    run_id: int,
+    data_dir: Path,
+    run_inputs: dict[str, str],
+    iteration: Iteration,
+) -> StepResult:
+    """Run the step once per file in iteration.matched_glob (or once if empty)."""
+    if step.produces and iteration.substituted_outputs and _all_outputs_exist(iteration, pipeline.dir):
+        return StepResult(status="skipped")
+    if step.produces and iteration.matched_glob and _all_outputs_exist_for_iter(iteration, step.produces, pipeline.dir):
+        return StepResult(status="skipped")
+
+    env = _build_env(run_id, run_inputs, data_dir, pipeline.name)
+    env["PQ_PIPELINE_DIR"] = str(pipeline.dir)
+    log_dir = data_dir / "runs" / str(run_id) / "steps" / step.id / str(iteration.index)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "log.txt"
+
+    files = iteration.matched_glob if iteration.matched_glob else [None]
+    for src in files:
+        # Build args for this single file
+        args = list(step.args)
+        if src is not None:
+            args = [a.replace("{prompts}", str(src)) for a in args]
+            # For count_from fan-out, derive {i} from the matched file's stem.
+            per_file_index = src.stem.split("_")[-1]
+        else:
+            per_file_index = str(iteration.index)
+        args = [a.replace("{i}", per_file_index) for a in args]
+
+        with log_path.open("a") as logf:
+            proc = subprocess.run(
+                [step.command, *args],
+                cwd=str(pipeline.dir),
+                env=env,
+                stdout=logf,
+                stderr=subprocess.STDOUT,
+            )
+        (log_dir / "exit_code").write_text(str(proc.returncode))
+        if proc.returncode != 0:
+            return StepResult(status="failed", exit_code=proc.returncode)
+
+    return StepResult(status="done", exit_code=0)
 
 
 def run_step(
@@ -124,3 +139,37 @@ def run_step(
     if proc.returncode == 0:
         return StepResult(status="done", exit_code=0)
     return StepResult(status="failed", exit_code=proc.returncode)
+
+
+def run_step_with_retries(
+    step: Step,
+    pipeline: Pipeline,
+    run_id: int,
+    data_dir: Path,
+    run_inputs: dict[str, str],
+    max_attempts: int,
+    backoff: tuple[int, ...],
+) -> StepResult:
+    """Run step, retrying on failure with the given backoff (seconds)."""
+    iterations = expand_iterations(step, pipeline.dir)
+    # Skip check for non-iterating steps with produces
+    if step.iterates is None and step.produces:
+        it = iterations[0]
+        if it.substituted_outputs and all(p.exists() for p in it.substituted_outputs.values()):
+            return StepResult(status="skipped")
+
+    last_status = "failed"
+    last_exit = None
+    for attempt in range(1, max_attempts + 1):
+        result = _run_single_iteration(step, pipeline, run_id, data_dir, run_inputs, iterations[0])
+        if result.status == "done":
+            return result
+        if result.status == "skipped":
+            return result
+        last_status = "failed"
+        last_exit = result.exit_code
+        if attempt < max_attempts:
+            delay = backoff[min(attempt - 1, len(backoff) - 1)]
+            if delay > 0:
+                time.sleep(delay)
+    return StepResult(status=last_status, exit_code=last_exit)
