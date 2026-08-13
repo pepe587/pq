@@ -15,6 +15,7 @@ from pq import pipelines as pipelines_mod
 from pq import runner as runner_mod
 from pq import scheduler as scheduler_mod
 from pq import cancel as cancel_mod
+from pq.config import Config
 
 
 @click.group()
@@ -195,8 +196,26 @@ def logs(ctx: click.Context, run_id: int, step_id: str | None) -> None:
 @click.argument("run_id", type=int)
 @click.pass_context
 def retry(ctx: click.Context, run_id: int) -> None:
-    """Retry a failed run."""
-    raise NotImplementedError
+    """Retry a failed run (resets failed steps to pending, marks run queued)."""
+    cfg: Config = ctx.obj["config"]
+    db_path = db_mod.init_db(cfg.data_dir)
+    conn = db_mod.get_conn(db_path)
+    try:
+        cur = conn.execute("SELECT status FROM runs WHERE id=?", (run_id,))
+        row = cur.fetchone()
+        if row is None:
+            raise click.ClickException(f"no such run: {run_id}")
+        if row["status"] != "failed":
+            raise click.ClickException(f"run {run_id} is not failed (status: {row['status']})")
+        conn.execute("UPDATE runs SET status='queued' WHERE id=?", (run_id,))
+        conn.execute(
+            "UPDATE steps SET status='pending', attempts=0 WHERE run_id=? AND status='failed'",
+            (run_id,),
+        )
+        conn.commit()
+        click.echo(f"Run {run_id} requeued")
+    finally:
+        conn.close()
 
 
 @main.command()
