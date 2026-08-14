@@ -225,6 +225,14 @@ def cancel(ctx: click.Context, run_id: int) -> None:
     db_path = db_mod.init_db(cfg.data_dir)
     conn = db_mod.get_conn(db_path)
     try:
+        cur = conn.execute("SELECT status FROM runs WHERE id=?", (run_id,))
+        row = cur.fetchone()
+        if row is None:
+            raise click.ClickException(f"no such run: {run_id}")
+        if row["status"] not in ("running", "waiting"):
+            raise click.ClickException(
+                f"run {run_id} is not active (status: {row['status']})"
+            )
         cancel_mod.cancel_run(conn, run_id, cfg.data_dir)
         click.echo(f"Run {run_id} cancelled")
     finally:
