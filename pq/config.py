@@ -15,6 +15,7 @@ class Config:
     backoff: tuple[int, ...] = (30, 120, 600)
     max_uploads_per_day: int = 3
     timezone: str = "UTC"
+    cycle_pipelines: tuple[str, ...] = ()
 
 
 def load_config(config_path: str | None, data_dir_override: str | None) -> Config:
@@ -34,6 +35,7 @@ def load_config(config_path: str | None, data_dir_override: str | None) -> Confi
     worker = data.get("worker", {})
     retry = data.get("retry", {})
     quota = data.get("quota", {})
+    scheduler = data.get("scheduler", {})
 
     data_dir_str = data_dir_override or general.get("data_dir") or "~/.local/share/pq"
     data_dir = Path(data_dir_str).expanduser()
@@ -46,4 +48,5 @@ def load_config(config_path: str | None, data_dir_override: str | None) -> Confi
         backoff=tuple(retry.get("backoff", [30, 120, 600])),
         max_uploads_per_day=quota.get("max_uploads_per_day", 3),
         timezone=quota.get("timezone", "UTC"),
+        cycle_pipelines=tuple(scheduler.get("cycle_pipelines", [])),
     )

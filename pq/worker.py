@@ -8,6 +8,7 @@ import zoneinfo
 from pathlib import Path
 
 from pq import counter as counter_mod
+from pq import cycle as cycle_mod
 from pq import db as db_mod
 from pq import runner as runner_mod
 from pq import scheduler as scheduler_mod
@@ -184,11 +185,24 @@ def _topo_order_from_snapshot(snapshot: dict, pipeline_dir: Path):
 def worker_loop(cfg: Config, stop: WorkerStop) -> None:
     """Main loop. Polls every cfg.poll_interval_seconds when idle.
 
+    Each iteration:
+      1. Try pick_next_run for an existing queued/waiting run (manual or auto).
+         - If a run is found, execute it and restart the loop. Manual `pq add`
+           and auto-enqueued cycle runs share the same FIFO queue, so the
+           oldest id runs first regardless of origin.
+      2. If no run is found AND cfg.cycle_pipelines is non-empty, ask the
+         cycle scheduler for the next due pipeline; if found, enqueue it
+         and continue (the enqueue writes a queued row, so the NEXT loop
+         iteration's pick_next_run will pick it up — preserving FIFO order
+         vs any manually added runs).
+      3. Otherwise sleep cfg.poll_interval_seconds and try again.
+
     Loops while not stop.should_stop. On the FIRST iteration the flag may
     already be set (e.g. a test that wants to run exactly one cycle and then
     exit): we honor that by processing one run before re-checking.
     """
     db_mod.init_db(cfg.data_dir)
+    cycle_idx = 0  # in-memory: resets on daemon restart, per design (see CLAUDE.md)
     first_iteration = True
     while first_iteration or not stop.should_stop:
         first_iteration = False
@@ -197,10 +211,33 @@ def worker_loop(cfg: Config, stop: WorkerStop) -> None:
             now = dt.datetime.now().isoformat()
             today = _today_in_tz(cfg.timezone)
             run_id = scheduler_mod.pick_next_run(conn, now, cfg.max_uploads_per_day, today)
-            if run_id is None:
-                if cfg.poll_interval_seconds > 0:
-                    time.sleep(cfg.poll_interval_seconds)
+            if run_id is not None:
+                _execute_run(conn, run_id, cfg.data_dir, cfg, today, stop=stop)
                 continue
-            _execute_run(conn, run_id, cfg.data_dir, cfg, today, stop=stop)
+
+            # No queued run; ask the cycle if any pipeline is due.
+            if cfg.cycle_pipelines:
+                picked = cycle_mod.next_due_pipeline(
+                    conn,
+                    cfg.cycle_pipelines,
+                    today,
+                    cfg.max_uploads_per_day,
+                    now,
+                    cycle_idx,
+                )
+                if picked is not None:
+                    new_idx, pipeline_name = picked
+                    cycle_idx = new_idx
+                    new_run_id = cycle_mod.enqueue_cycle_run(
+                        conn, cfg.data_dir, pipeline_name
+                    )
+                    if new_run_id is not None:
+                        # Don't execute this iteration; let the next loop
+                        # iteration pick it via pick_next_run. This way
+                        # FIFO interleaving with manual adds is automatic.
+                        continue
+            # Nothing to do.
+            if cfg.poll_interval_seconds > 0:
+                time.sleep(cfg.poll_interval_seconds)
         finally:
             conn.close()
