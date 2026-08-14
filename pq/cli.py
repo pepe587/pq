@@ -9,6 +9,7 @@ import click
 
 from pq import config as config_mod
 from pq import db as db_mod
+from pq import gc as gc_mod
 from pq import pipelines as pipelines_mod
 from pq import cancel as cancel_mod
 from pq import queue as queue_mod
@@ -172,6 +173,70 @@ def cancel(ctx: click.Context, run_id: int) -> None:
         click.echo(f"Run {run_id} cancelled")
     finally:
         conn.close()
+
+
+@main.command()
+@click.option(
+    "--older-than",
+    "older_than_days",
+    default=30,
+    type=int,
+    help="Remove runs finished more than N days ago (default 30).",
+)
+@click.option(
+    "--keep-failed/--no-keep-failed",
+    default=True,
+    help="Keep failed runs regardless of age (default: keep).",
+)
+@click.option(
+    "--keep-cancelled/--no-keep-cancelled",
+    default=True,
+    help="Keep cancelled runs regardless of age (default: keep).",
+)
+@click.option(
+    "--apply",
+    "apply",
+    is_flag=True,
+    default=False,
+    help="Actually delete. Without --apply the command is a dry run.",
+)
+@click.pass_context
+def gc(
+    ctx: click.Context,
+    older_than_days: int,
+    keep_failed: bool,
+    keep_cancelled: bool,
+    apply: bool,
+) -> None:
+    """Garbage-collect old runs (dry run by default; pass --apply to delete)."""
+    cfg: Config = ctx.obj["config"]
+    db_path = db_mod.init_db(cfg.data_dir)
+    conn = db_mod.get_conn(db_path)
+    try:
+        candidates, removed = gc_mod.run_garbage_collection(
+            conn,
+            cfg.data_dir,
+            older_than_days=older_than_days,
+            keep_failed=keep_failed,
+            keep_cancelled=keep_cancelled,
+            dry_run=not apply,
+        )
+    finally:
+        conn.close()
+
+    if not candidates:
+        click.echo("(no runs to garbage-collect)")
+        return
+
+    if apply:
+        click.echo(f"Removed {removed} run(s):")
+    else:
+        click.echo(f"Would remove {len(candidates)} run(s) (dry run; pass --apply to delete):")
+    for c in candidates:
+        click.echo(
+            f"  #{c.run_id:<6} {c.pipeline_name:<22} {c.status:<11} "
+            f"finished {c.finished_at}  ({c.age_days}d old)"
+        )
 
 
 @main.command()

@@ -10,6 +10,7 @@ from pathlib import Path
 from pq import counter as counter_mod
 from pq import cycle as cycle_mod
 from pq import db as db_mod
+from pq import reap as reap_mod
 from pq import runner as runner_mod
 from pq import scheduler as scheduler_mod
 from pq.config import Config
@@ -204,6 +205,18 @@ def worker_loop(cfg: Config, stop: WorkerStop) -> None:
     db_mod.init_db(cfg.data_dir)
     cycle_idx = 0  # in-memory: resets on daemon restart, per design (see CLAUDE.md)
     first_iteration = True
+
+    # Reap any orphan runs left behind by a previous daemon crash.
+    # Idempotent: a clean DB returns 0 and we proceed normally.
+    _orphan_conn = db_mod.get_conn(cfg.data_dir / "pq.db")
+    try:
+        reaped = reap_mod.reap_stale_runs(_orphan_conn, cfg.data_dir)
+    finally:
+        _orphan_conn.close()
+    if reaped:
+        import sys
+        print(f"Reaped {reaped} orphan run(s) from a previous daemon.", file=sys.stderr)
+
     while first_iteration or not stop.should_stop:
         first_iteration = False
         conn = db_mod.get_conn(cfg.data_dir / "pq.db")
