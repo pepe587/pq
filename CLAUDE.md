@@ -144,6 +144,35 @@ propio run inline, un `pq add` manual que llegó entre el `pick_next_run`
 y la ejecución se saltaría sin oportunidad. Haciendo `continue`, el
 siguiente loop vuelve a `pick_next_run` y deja que el motor FIFO decida.
 
+### 10. Reap de huérfanos al arrancar el daemon
+
+`pq/worker.py::worker_loop` llama a `pq/reap.py::reap_stale_runs` UNA vez
+al arrancar, antes del bucle principal. Recorre filas con `status='running'`,
+lee `meta.json["pid"]` y manda `SIGKILL`. Si el PID ya está muerto
+(`ProcessLookupError`) no falla, sigue. Marca cada run reapado como
+`failed` con `error="orphan from previous daemon"`.
+
+NO uses `atexit.register` para esto: Python no ejecuta atexit en SIGKILL.
+La única forma de cubrir crashes duros (OOM, segfault, SIGKILL manual,
+power loss) es reap-on-startup. Si rearrancas el daemon después de un
+crash, los huérfanos mueren en el siguiente start.
+
+NO añadas "sweep periódico" dentro del bucle — con reapar al arrancar
+basta, y un sweep periódico añadiría carga sin beneficio real (los
+huérfanos solo aparecen tras crash, que es raro).
+
+### 11. GC es dry-run por defecto
+
+`pq gc` NO borra nada sin `--apply`. La razón: borrar `runs/<id>/meta.json`
+y la fila de DB es destructivo y el operador no siempre sabe qué hay en
+esa fila (puede haber dejado outputs en disco bajo `pipeline_dir` que
+quiere conservar). Mostrar la lista primero y exigir el flag explícito
+para borrar reduce el riesgo de un `rm -rf` accidental vía CLI.
+
+NO cambies el default a `--apply=True`. Si el operador quiere borrar sin
+pensar, que pase el flag; el coste de un flag extra es trivial y el
+beneficio de evitar un desastre también.
+
 ## Cómo correr los tests
 
 ```bash

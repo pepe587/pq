@@ -169,6 +169,10 @@ pq retry <run_id>
 # Cancelar un run activo (SIGKILL al subprocess, marca cancelled, conserva outputs)
 pq cancel <run_id>
 
+# Garbage-collect runs viejos (dry run por defecto; --apply para borrar)
+pq gc [--older-than Nd] [--keep-failed/--no-keep-failed]
+     [--keep-cancelled/--no-keep-cancelled] [--apply]
+
 # Worker en foreground (Ctrl+C = stop limpio entre runs)
 pq daemon
 ```
@@ -247,6 +251,42 @@ outputs que ya tienes.
 `cancelled`. Los outputs generados hasta ese momento se conservan en disco.
 Si el run está esperando un backoff entre reintentos, sale del sleep
 inmediatamente.
+
+### Reaping de huérfanos (al arrancar el daemon)
+
+Si `pq daemon` muere por SIGKILL, OOM, segfault o se va la luz, los
+subprocess que estuviera ejecutando quedan vivos sin nadie que los mate, y
+la fila `runs` queda en `running` para siempre. Cada vez que arrancas
+`pq daemon`, antes del bucle principal escanea los runs `running` y:
+
+1. Lee el PID guardado en `runs/<id>/meta.json`.
+2. Manda SIGKILL.
+3. Marca el run como `failed` con `error="orphan from previous daemon"`.
+
+Muestra por stderr cuántos reapó, ej: `Reaped 2 orphan run(s) from a
+previous daemon`. Si la DB está limpia, no dice nada. Operador decide
+después si hace `pq retry`.
+
+### Garbage collection (`pq gc`)
+
+La tabla `runs` crece sin límite y cada run tiene su propio directorio
+`runs/<id>/` con `meta.json` y logs. `pq gc` los borra:
+
+```bash
+# Dry run: lista lo que borraría, no borra nada
+pq gc --older-than 30
+
+# Aplicar de verdad
+pq gc --older-than 30 --apply
+
+# Variantes
+pq gc --older-than 7 --apply --no-keep-failed
+pq gc --older-than 90 --apply --no-keep-cancelled
+```
+
+Por defecto conserva todos los runs `failed` y `cancelled` (pueden ser
+útiles como registro). El DB per-pipeline (`db/<name>.db`) **no** se
+toca — es memoria persistente entre runs, no basura.
 
 ### Persistencia por pipeline
 
