@@ -6,7 +6,7 @@ consumen mucha VRAM de forma secuencial, sin offload entre ellos.
 
 Cada pipeline se declara en un `pipeline.yaml`, se encola con `pq add`, y un
 proceso `pq daemon` los va cogiendo en orden FIFO, ejecutando sus steps, y
-aplicando cooldown por pipeline más una quota diaria de uploads a YouTube.
+aplicando cooldown por pipeline.
 
 ## Instalación
 
