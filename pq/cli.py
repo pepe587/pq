@@ -12,8 +12,6 @@ from pq import config as config_mod
 from pq import db as db_mod
 from pq import pipeline_db as pipeline_db_mod
 from pq import pipelines as pipelines_mod
-from pq import runner as runner_mod
-from pq import scheduler as scheduler_mod
 from pq import cancel as cancel_mod
 from pq.config import Config
 

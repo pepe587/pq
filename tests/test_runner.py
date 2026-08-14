@@ -35,7 +35,6 @@ def test_run_step_success(tmp_path: Path):
         run_id=1,
         data_dir=tmp_path / "data",
         run_inputs={"topic": "hi"},
-        attempt=1,
     )
     assert result.status == "done"
     assert (pipe / "outputs" / "x.txt").exists()
@@ -59,7 +58,6 @@ def test_run_step_skip_if_exists(tmp_path: Path):
         run_id=1,
         data_dir=tmp_path / "data",
         run_inputs={},
-        attempt=1,
     )
     assert result.status == "skipped"
     assert (pipe / "outputs" / "x.txt").read_text() == "pre-existing"
@@ -80,7 +78,6 @@ def test_run_step_failure(tmp_path: Path):
         run_id=1,
         data_dir=tmp_path / "data",
         run_inputs={},
-        attempt=1,
     )
     assert result.status == "failed"
     assert result.exit_code == 7
@@ -104,7 +101,6 @@ def test_env_vars_injected(tmp_path: Path):
         run_id=42,
         data_dir=data_dir,
         run_inputs={"topic": "hello"},
-        attempt=1,
     )
     assert result.status == "done"
     content = (pipe / "outputs" / "x.txt").read_text()

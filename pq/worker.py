@@ -12,7 +12,6 @@ from pq import db as db_mod
 from pq import runner as runner_mod
 from pq import scheduler as scheduler_mod
 from pq.config import Config
-from pq.pipelines import load_pipeline, validate_pipeline
 from pq.signals import WorkerStop
 
 
@@ -24,7 +23,7 @@ def _today_in_tz(tz: str) -> str:
     return dt.datetime.now(zone).date().isoformat()
 
 
-def _execute_run(conn, run_id: int, data_dir: Path, cfg: Config, today: str) -> None:
+def _execute_run(conn, run_id: int, data_dir: Path, cfg: Config, today: str, stop: WorkerStop | None = None) -> None:
     """Run a single run end-to-end."""
     cur = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,))
     run = cur.fetchone()
@@ -78,6 +77,7 @@ def _execute_run(conn, run_id: int, data_dir: Path, cfg: Config, today: str) -> 
             run_inputs=inputs,
             max_attempts=cfg.max_attempts,
             backoff=cfg.backoff,
+            stop=stop,
         )
 
         if result.status == "done":
@@ -201,6 +201,6 @@ def worker_loop(cfg: Config, stop: WorkerStop) -> None:
                 if cfg.poll_interval_seconds > 0:
                     time.sleep(cfg.poll_interval_seconds)
                 continue
-            _execute_run(conn, run_id, cfg.data_dir, cfg, today)
+            _execute_run(conn, run_id, cfg.data_dir, cfg, today, stop=stop)
         finally:
             conn.close()
